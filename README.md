@@ -41,6 +41,16 @@ lk cloud auth
 lk app env -w -d .env.local
 ```
 
+## Run the Token server
+
+This starter project includes a simple FastAPI-based token server to provide access tokens to your frontend or telephony applications.
+
+To run the token server, use this command:
+
+```console
+uv run python src/server.py
+```
+
 ## Run the agent
 
 Before your first run, you must download certain models such as [Silero VAD](https://docs.livekit.io/agents/build/turns/vad/) and the [LiveKit turn detector](https://docs.livekit.io/agents/build/turns/turn-detector/):
