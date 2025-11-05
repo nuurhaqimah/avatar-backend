@@ -1,7 +1,9 @@
+import json
 import logging
 import uuid
-
 from dataclasses import dataclass, field
+from typing import List, Optional
+
 from dotenv import load_dotenv
 from livekit.agents import (
     Agent,
@@ -10,12 +12,12 @@ from livekit.agents import (
     JobProcess,
     MetricsCollectedEvent,
     RoomInputOptions,
+    RunContext,
     WorkerOptions,
     cli,
+    function_tool,
     metrics,
 )
-from typing import Optional
-from livekit.agents import function_tool, Agent, RunContext
 from livekit.plugins import elevenlabs, noise_cancellation, openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
@@ -23,27 +25,37 @@ logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
+
 @dataclass
 class UserInfo:
     """Class to represent a user information"""
+
     id: str
     name: str
     age: int | None
 
+
+@dataclass
+class Component:
+    """Class to represent a FE component"""
+
+    id: str
+    content: str
+    is_showed: bool = False
+
+
 @dataclass
 class UserData:
     """Class to store user data during a session"""
+
     ctx: Optional[JobContext] = None
     name: str = field(default_factory=str)
     age: int = field(default_factory=int)
+    components = List[Component] = field(default_factory=list)
 
     def set_user_info(self, name: str, age: int) -> UserInfo:
         """Set user information"""
-        user_info = UserInfo(
-            id=str(uuid.uuid4()),
-            name=name,
-            age=age
-        )
+        user_info = UserInfo(id=str(uuid.uuid4()), name=name, age=age)
         self.name = name
         self.age = age
         return user_info
@@ -54,6 +66,28 @@ class UserData:
             return UserInfo(id=str(uuid.uuid4()), name=self.name, age=self.age)
         return None
 
+    def add_component(self, content: str) -> Component:
+        """Add a new component to the collection"""
+        component = Component(id=str(uuid.uuid4()), content=content)
+        self.components.append(component)
+        return component
+
+    def get_component(self, action_id: str) -> Optional[Component]:
+        """Get a component by ID"""
+        for component in self.components:
+            if component.id == action_id:
+                return component
+        return None
+
+    def toggle_component(self, action_id: str) -> Optional[Component]:
+        """Toggle display of the component by ID"""
+        component = self.get_component(action_id)
+        if component:
+            component.is_showed = not component.is_showed
+            return component
+        return None
+
+
 class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(
@@ -61,9 +95,9 @@ class Assistant(Agent):
             You eagerly assist users with their questions by providing information from your extensive knowledge.
             Your responses are concise, to the point, and without any complex formatting including emojis, asterisks, or other symbols.
             You are curious, friendly, and have a sense of humor.
-            
+
             Use the lookup_weather function if the user asked about the current weather.
-            
+
             When user ask who they are, use the function get_user_data.
             And when user introduce their name and age, use the function set_user_data.
             """,
@@ -75,21 +109,21 @@ class Assistant(Agent):
     @function_tool
     async def lookup_weather(self, context: RunContext, location: str):
         """Use this tool to look up current weather information in the given location.
-    
+
         If the location is not supported by the weather service, the tool will indicate this. You must tell the user the location's weather is unavailable.
-    
+
         Args:
             location: The location to look up weather information for (e.g. city name)
         """
-    
+
         logger.info(f"Looking up weather for {location}")
-    
+
         return "sunny with a temperature of 70 degrees."
-    
+
     @function_tool
     async def set_user_data(self, context: RunContext[UserData], name: str, age: int):
         """Store the user's name and age in this session
-        
+
         Args:
             name: Name of the user
             age: Age of the user
@@ -97,8 +131,10 @@ class Assistant(Agent):
         userdata = context.userdata
         userdata.set_user_info(name, age)
 
-        return f"Okay, now I will remember your name is {name} and you are {age} year old."
-    
+        return (
+            f"Okay, now I will remember your name is {name} and you are {age} year old."
+        )
+
     @function_tool
     async def get_user_data(self, context: RunContext[UserData]):
         """Get the current session user name and age"""
@@ -108,6 +144,89 @@ class Assistant(Agent):
         if user_info:
             return f"Your name: {user_info.name} and your age: {user_info.age}"
         return "I don't know your name. Please introduce your name and your age"
+
+    @function_tool
+    async def create_component(self, context: RunContext[UserData], content: str):
+        """Create a component that store text and display it to the user
+
+        Args:
+            content: The text that want to be displayed
+        """
+        userdata = context.userdata
+        component = userdata.add_component(content)
+
+        # Get the room from the userdata
+        if not userdata.ctx or not userdata.ctx.room:
+            return "Created a component, but couldn't access the room to send it"
+        room = userdata.ctx.room
+
+        # Get the first participant in the room (should be the client)
+        participants = room.remote_participants
+        if not participants:
+            return "Created a component, but no participants found to send it to"
+
+        # Get the first participant from the dictionary of remote participant
+        participant = next(iter(participants.values()), None)
+        if not participant:
+            return "Created a component, but couldn't get the first participant"
+        payload = {
+            "action": "show",
+            "id": component.id,
+            "content": component.content,
+            "index": len(userdata.components) - 1,
+        }
+
+        # Make sure payload is properly serialized
+        json_payload = json.dumps(payload)
+        logger.info(f"Sending component payload: {json_payload}")
+        await room.local_participant.perform_rpc(
+            destination_identity=participant.identity,
+            method="client.component",
+            payload=json_payload,
+        )
+
+        return f"I've created a component with the content: {content}"
+
+    @function_tool
+    async def toggle_component(self, context: RunContext[UserData], component_id: str):
+        """Toggle display of the component (show/hide)
+
+        Args:
+            component_id: The ID of the component to be toggled
+        """
+        userdata = context.userdata
+        component = userdata.toggle_component(component_id)
+
+        if not component:
+            return f"Component with ID {component_id} not found"
+
+        # Get the room from the userdata
+        if not userdata.ctx or not userdata.ctx.room:
+            return "Toggled the component, but couldn't access the room to send it"
+        room = userdata.ctx.room
+
+        # Get the first participant in the room (should be the client)
+        participants = room.remote_participants
+        if not participants:
+            return "Toggled the component, but no participants found to send it to"
+
+        # Get the first participant from the dictionary of remote participants
+        participant = next(iter(participants.values()), None)
+        if not participant:
+            return "Toggled the component, but couldn't get the first participant."
+        payload = {"action": "toggle", "id": component.id}
+
+        # Make sure payload is properly serialized
+        json_payload = json.dumps(payload)
+        logger.info(f"Send toggle component payload: {json_payload}")
+        await room.local_participant.perform_rpc(
+            destination_identity=participant.identity,
+            method="client.component",
+            payload=json_payload,
+        )
+
+        return f"I've toggled the component to {'show' if component.is_showed else 'hide'} the component"
+
 
 def prewarm(proc: JobProcess):
     proc.userdata["vad"] = silero.VAD.load()
@@ -144,6 +263,49 @@ async def entrypoint(ctx: JobContext):
         # allow the LLM to generate a response while waiting for the end of turn
         # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
         preemptive_generation=True,
+    )
+
+    # Register RPC method for listening button from FE
+    async def handle_toggle_component(rpc_data):
+        try:
+            logger.info(f"Received toggle component payload: {rpc_data}")
+
+            # Extract the payload from the RpcInvocationData object
+            payload_str = rpc_data.payload
+            logger.info(f"Extracted quiz submission string: {payload_str}")
+
+            # Parse the JSON payload
+            payload_data = json.loads(payload_str)
+            logger.info(f"Parsed clicked button data: {payload_data}")
+
+            action_id = payload_data.get("id")
+
+            if action_id:
+                component = userdata.toggle_component(action_id)
+                if component:
+                    logger.info(
+                        f"Toggled component {action_id}, is_showed: {component.is_showed}"
+                    )
+                    # Send a message to the user via the agent
+                    session.generate_reply(
+                        instructions=(
+                            "Say to the user that they successfully toggle the component"
+                        )
+                    )
+                else:
+                    logger.error(f"Component with ID {action_id} not found")
+            else:
+                logger.error("No action ID found in payload")
+
+            return "success"
+        except Exception as e:
+            logger.error(f"Error handling button click: {e}")
+            return f"error: {str(e)}"
+
+    # Register RPC methods - The method names need to match exactly what the client is calling
+    logger.info("Registering RPC methods")
+    ctx.room.local_participant.register_rpc_method(
+        "agent.toggleComponent", handle_toggle_component
     )
 
     # To use a realtime model instead of a voice pipeline, use the following session setup instead.
