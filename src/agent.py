@@ -107,38 +107,34 @@ class UserData:
 class Assistant(Agent):
     def __init__(self) -> None:
         super().__init__(
-            instructions="""You are a helpful voice AI assistant. The user is interacting with you via voice, even if you perceive the conversation as text.
-            You eagerly assist users with their questions by providing information from your extensive knowledge.
-            Your responses are concise, to the point, and without any complex formatting including emojis, asterisks, or other symbols.
-            You are curious, friendly, and have a sense of humor.
+            instructions="""Kamu adalah Vyna, seorang tutor AI yang bertugas menjelaskan materi Matematika seperti guru sungguhan.
+            Ubah setiap simbol dan angka dalam bentuk lisan.
+            Langsung menjelaskan materi tanpa basa-basi. Gunakan bahasa Indonesia.
 
-            Use the lookup_weather function if the user asked about the current weather.
+            Awali interaksi dengan perkenalan singkat dan tanyakan apa yang ingin dipelajari oleh siswa.
+            Buat giliran bicaramu singkat, hanya satu atau dua kalimat. Interaksi dengan pengguna menggunakan suara jadi respons secara singkat, to the point, dan tanpa format dan simbol kompleks.
 
-            When user ask who they are, use the function get_user_data.
-            And when user introduce their name and age, use the function set_user_data.
-
-            When teaching or explaining visual concepts, use show_illustration to display relevant images or diagrams to help the user understand better.
-            Available illustrations: "pythagoras" (for Pythagorean theorem, geometry, triangles).
-            You can use hide_illustration when you want to clear the display or move to a different topic.
+            Ketika menjelasan konsep dengan visual, gunakan fungsi show_illustration untuk menampilkan gambar atau diagram relevan agar siswa lebih mudah memahami.
+            Gunakan fungsi hide_illustration ketika kamu ingin membersihkan gambar ilustrasi atau berpindah topik.
             """,
         )
 
     # To add tools, use the @function_tool decorator.
     # Here's an example that adds a simple weather tool.
     # You also have to add `from livekit.agents import function_tool, RunContext` to the top of this file
-    @function_tool
-    async def lookup_weather(self, context: RunContext, location: str):
-        """Use this tool to look up current weather information in the given location.
+    # @function_tool
+    # async def lookup_weather(self, context: RunContext, location: str):
+    #     """Use this tool to look up current weather information in the given location.
 
-        If the location is not supported by the weather service, the tool will indicate this. You must tell the user the location's weather is unavailable.
+    #     If the location is not supported by the weather service, the tool will indicate this. You must tell the user the location's weather is unavailable.
 
-        Args:
-            location: The location to look up weather information for (e.g. city name)
-        """
+    #     Args:
+    #         location: The location to look up weather information for (e.g. city name)
+    #     """
 
-        logger.info(f"Looking up weather for {location}")
+    #     logger.info(f"Looking up weather for {location}")
 
-        return "sunny with a temperature of 70 degrees."
+    #     return "sunny with a temperature of 70 degrees."
 
     @function_tool
     async def set_user_data(self, context: RunContext[UserData], name: str, age: int):
@@ -390,7 +386,7 @@ async def entrypoint(ctx: JobContext):
         userdata=userdata,
         # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
         # See all available models at https://docs.livekit.io/agents/models/stt/
-        stt=openai.STT(model="gpt-4o-mini-transcribe", detect_language=True),
+        stt=openai.STT(model="gpt-4o-mini-transcribe", language="id"),
         # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
         # See all available models at https://docs.livekit.io/agents/models/llm/
         llm=openai.LLM(model="gpt-4.1-mini", temperature=0.4),
