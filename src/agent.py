@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import sys
 import uuid
 from dataclasses import dataclass, field
 from typing import Optional
@@ -113,6 +114,15 @@ class Assistant(Agent):
 
             Awali interaksi dengan perkenalan singkat dan tanyakan apa yang ingin dipelajari oleh siswa.
             Buat giliran bicaramu singkat, hanya satu atau dua kalimat. Interaksi dengan pengguna menggunakan suara jadi respons secara singkat, to the point, dan tanpa format dan simbol kompleks.
+
+            PENTING - Ketika siswa sedang mengerjakan kuis:
+            - JANGAN PERNAH memberikan jawaban langsung atau menyebutkan pilihan yang benar
+            - Berikan petunjuk, penjelasan konsep, atau cara berpikir untuk memecahkan soal
+            - Ajukan pertanyaan balik untuk membantu siswa berpikir sendiri
+            - Jika siswa meminta jawaban langsung, arahkan mereka untuk mencoba sendiri dengan bimbinganmu
+            - Contoh: "Coba pikirkan, apa yang terjadi jika kamu menambahkan 7 dengan 5?" bukan "Jawabannya adalah 12"
+            
+            Jika pesan dimulai dengan [CONTEXT - Current Quiz Question:], itu artinya siswa sedang mengerjakan soal kuis tersebut. Gunakan informasi ini untuk memberikan bantuan yang relevan tanpa memberikan jawaban.
 
             Ketika menjelasan konsep dengan visual, gunakan fungsi show_illustration untuk menampilkan gambar atau diagram relevan agar siswa lebih mudah memahami.
             Gunakan fungsi hide_illustration ketika kamu ingin membersihkan gambar ilustrasi atau berpindah topik.
@@ -476,24 +486,130 @@ async def entrypoint(ctx: JobContext):
     # # Start the avatar and wait for it to join
     # await avatar.start(session, room=ctx.room)
 
+    # Join the room first; starting room I/O before connect can crash the worker.
+    await ctx.connect()
+
+    nc = None
+    try:
+        # BVC noise cancellation can be unstable on some Windows setups.
+        if not sys.platform.startswith("win"):
+            nc = noise_cancellation.BVC()
+    except Exception as e:
+        logger.warning(f"Failed to init noise cancellation: {e}")
+        nc = None
+
     # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(
         agent=Assistant(),
         room=ctx.room,
         room_input_options=RoomInputOptions(
-            # For telephony applications, use `BVCTelephony` for best results
-            noise_cancellation=noise_cancellation.BVC(),
+            noise_cancellation=nc,
         ),
     )
 
-    # Join the room and connect to the userW
-    await ctx.connect()
+    def _extract_text_from_data_packet(raw: bytes) -> str:
+        try:
+            decoded = raw.decode("utf-8", errors="ignore")
+        except Exception:
+            return ""
+
+        # LiveKit chat payloads may be a plain string or a JSON object.
+        s = decoded.strip()
+        if not s:
+            return ""
+        try:
+            obj = json.loads(s)
+            if isinstance(obj, dict):
+                text_val = (
+                    obj.get("message")
+                    or obj.get("text")
+                    or obj.get("content")
+                    or obj.get("msg")
+                )
+                if isinstance(text_val, str):
+                    return text_val
+        except Exception:
+            # Not JSON, treat as plain string
+            pass
+        return s
+
+    async def _publish_chat_text(text: str) -> None:
+        try:
+            # Back-compat for older LiveKit chat implementations
+            await ctx.room.local_participant.publish_data(text, topic="lk-chat-topic")
+        except Exception as e:
+            logger.error(f"Failed to publish chat text: {e}")
+
+    published_speech_ids: set[str] = set()
+
+    def _on_speech_done(handle):
+        try:
+            # Avoid double-publishing if callbacks fire more than once
+            if getattr(handle, "id", None) in published_speech_ids:
+                return
+            if getattr(handle, "id", None):
+                published_speech_ids.add(handle.id)
+
+            items = getattr(handle, "chat_items", []) or []
+            assistant_texts: list[str] = []
+            for item in items:
+                try:
+                    if getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant":
+                        txt = getattr(item, "text_content", None)
+                        if isinstance(txt, str) and txt.strip():
+                            assistant_texts.append(txt.strip())
+                except Exception:
+                    continue
+
+            if assistant_texts:
+                # Send the final assistant message as text into the room.
+                asyncio.create_task(_publish_chat_text(assistant_texts[-1]))
+        except Exception as e:
+            logger.error(f"Failed publishing assistant chat text: {e}")
+
+    def _on_data_received(packet):
+        try:
+            # Ignore server-originated packets (no participant)
+            if getattr(packet, "participant", None) is None:
+                return
+
+            topic = getattr(packet, "topic", "") or ""
+            # Only react to chat messages
+            if topic and topic not in ("lk.chat", "lk-chat-topic"):
+                return
+
+            text = _extract_text_from_data_packet(getattr(packet, "data", b""))
+            if not text.strip():
+                return
+
+            logger.info(
+                f"[Chat] data_received from={getattr(packet.participant, 'identity', 'unknown')} topic={getattr(packet, 'topic', '')} text={text[:200]!r}"
+            )
+
+            # Interrupt any ongoing speech and respond using the voice pipeline.
+            session.interrupt()
+            handle = session.generate_reply(user_input=text)
+            try:
+                handle.add_done_callback(_on_speech_done)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(f"Failed handling data_received event: {e}")
+
+    # Handle typed chat messages sent via LiveKit data packets
+    try:
+        ctx.room.on("data_received", _on_data_received)
+        logger.info("Registered LiveKit data_received handler for typed chat")
+    except Exception as e:
+        logger.error(f"Failed to register data_received handler: {e}")
 
     # Register RPC methods - The method names need to match exactly what the client is calling
     logger.info("Registering RPC methods")
     ctx.room.local_participant.register_rpc_method(
         "agent.toggleComponent", handle_toggle_component
     )
+
+    # Do not speak on connect. The frontend will trigger the first message after a quiz set is selected.
 
 
 if __name__ == "__main__":

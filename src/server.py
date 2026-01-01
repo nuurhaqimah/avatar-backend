@@ -4,15 +4,21 @@ from datetime import timedelta
 from typing import Optional
 
 from dotenv import load_dotenv
+
+# Load environment variables FIRST before importing quiz_router
+load_dotenv(".env.local")
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from livekit import api
 from pydantic import BaseModel
-
-load_dotenv(".env.local")
+from quiz_router import router as quiz_router
 
 app = FastAPI()
+
+# Include quiz router
+app.include_router(quiz_router)
 
 app.add_middleware(
     CORSMiddleware,
